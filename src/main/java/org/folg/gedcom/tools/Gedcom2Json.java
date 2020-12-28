@@ -34,6 +34,7 @@ import java.io.PrintWriter;
 import java.util.*;
 import java.util.stream.IntStream;
 
+import static org.folg.gedcom.tools.Gedcom2Json.AncestorEnum.*;
 import static org.folg.gedcom.tools.Gedcom2Json.HeaderEnum.*;
 
 /**
@@ -76,7 +77,12 @@ public class Gedcom2Json {
     }
 
     private static String[] headers() {
-        return Arrays.toString(HeaderEnum.values()).replaceAll("^.|.$", "").split(", ");
+        List<String> headers = new ArrayList();
+        for (AncestorEnum ancestorId : AncestorEnum.values()) {
+            for (HeaderEnum header: HeaderEnum.values())
+                headers.add(ancestorId.name() + header.name());
+        }
+        return headers.toArray(new String[headers.size()]);
     }
 
     //returns only Han char from the given string
@@ -173,59 +179,85 @@ public class Gedcom2Json {
         Set<LineageMap> finaldata = new TreeSet<>(new LineageMapSorter());
         int lineageLongerThanTwo = 0;
         for (List<Person> lineage : lineageMap.values()) {
-            if (lineage.size() < 2)
+            int size = lineage.size();
+            if (size < 2)
                 continue;
             lineageLongerThanTwo++;
-            int size = lineage.size();
             // get last person's name
             Person firstAncestor = lineage.get(size - 1);
             Person secondAncestor = lineage.get(size - 2);
             Person thirdAncestor = null;
-            if (lineage.size() > 2)
+            Person midAncestor = null;
+            Person endAncestor = null;
+            if (size > 2)
                 thirdAncestor = lineage.get(size - 3);
-            finaldata.add(this.populateAncestors(firstAncestor, secondAncestor, thirdAncestor));
+            if (size > 10) {
+                midAncestor = searchValidAncestor(lineage, size - Math.round(size / 3));
+                endAncestor = searchValidAncestor(lineage, size - 2 * Math.round(size / 3));
+            }
+            Map<AncestorEnum, Person> personMap = new EnumMap<>(AncestorEnum.class);
+            personMap.put(FIRST, firstAncestor);
+            personMap.put(SECOND, secondAncestor);
+            personMap.put(THIRD, thirdAncestor);
+            personMap.put(MID, midAncestor);
+            personMap.put(END, endAncestor);
+            finaldata.add(this.populateAncestors(personMap));
         }
         System.out.println("Found " + lineageLongerThanTwo + " lineage longer than 2");
         return finaldata;
     }
 
-    private LineageMap populateAncestors(Person firstAncestor, Person secondAncestor,
-                                         Person thirdAncestor) {
-        LineageMap resultMap = new LineageMap(HeaderEnum.class);
-        boolean hasAnte = thirdAncestor != null;
-        //assume one name
-        Name firstAncestorName = firstAncestor.getNames().get(0);
-        Name secondAncestorName = secondAncestor.getNames().get(0);
-        Name thirdAncestorName = hasAnte ? thirdAncestor.getNames().get(0) : null;
+    private Person searchValidAncestor(List<Person> lineage, int initialPosition) {
+        int newPosition = initialPosition;
+        if (!this.isPositionValid(lineage, newPosition)) {
+            boolean isValid = false;
+            int deviation = 1;
+            while (!isValid) {
+                newPosition = initialPosition + deviation;
+                isValid = this.isPositionValid(lineage, newPosition);
+                if (!isValid) {
+                    newPosition = initialPosition - deviation;
+                    isValid = this.isPositionValid(lineage, newPosition);
+                }
+                deviation++;
+                if (initialPosition + deviation == lineage.size() || initialPosition - deviation < 0)
+                    return null;
+            }
+        }
+        return lineage.get(newPosition);
+    }
 
-        resultMap.put(FIRST_ID, firstAncestor.getId());
-        resultMap.put(FIRST__MARRNM, firstAncestorName.getMarriedName());
-        resultMap.put(FIRST_GIVN, firstAncestorName.getGiven());
-        firstAncestor.getEventsFacts().forEach(eventFact -> {
-            if (eventFact.getTag().equals("BIRT"))
-                resultMap.put(FIRST_BIRT, eventFact.getDate());
-            if (eventFact.getTag().equals("DEAT"))
-                resultMap.put(FIRST_DEAT, eventFact.getDate());
-        });
-        resultMap.put(SECOND_ID, secondAncestor.getId());
-        resultMap.put(SECOND__MARRNM, secondAncestorName.getMarriedName());
-        resultMap.put(SECOND_GIVN, secondAncestorName.getGiven());
-        secondAncestor.getEventsFacts().forEach(eventFact -> {
-            if (eventFact.getTag().equals("BIRT"))
-                resultMap.put(SECOND_BIRT, eventFact.getDate());
-            if (eventFact.getTag().equals("DEAT"))
-                resultMap.put(SECOND_DEAT, eventFact.getDate());
-        });
+    private boolean isPositionValid(List<Person> lineage, int position) {
+        List<Name> names;
+        names = lineage.get(position).getNames();
+        if (!names.isEmpty()) {
+            return !this.extractHanScriptfrom(names.get(0).getGiven()).isEmpty();
+        }
+        return false;
+    }
 
-        resultMap.put(THIRD_ID, hasAnte ? thirdAncestor.getId() : "");
-        resultMap.put(THIRD__MARRNM, hasAnte ? thirdAncestorName.getMarriedName() : "");
-        resultMap.put(THIRD_GIVN, hasAnte ? thirdAncestorName.getGiven() : "");
-        if (hasAnte) {
-            thirdAncestor.getEventsFacts().forEach(eventFact -> {
+    /**
+     * Parses the data from the structured PersonMap into a LineageMap(Map<String,String>)
+     * of header value ready for CVS writing
+     */
+    private LineageMap populateAncestors(Map<AncestorEnum, Person> personMap) {
+        LineageMap resultMap = new LineageMap();
+        for (AncestorEnum ancestorId : AncestorEnum.values()) {
+            Person ancestor = personMap.get(ancestorId);
+            if (null == ancestor) {
+                for (HeaderEnum header : HeaderEnum.values())
+                    resultMap.put(ancestorId.name() + header.name(), null);
+                continue;
+            }
+            resultMap.put(ancestorId.name() + _ID, ancestor.getId());
+            Name name = ancestor.getNames().get(0); //assume one and only one name
+            resultMap.put(ancestorId.name() + __MARRNM, name.getMarriedName());
+            resultMap.put(ancestorId.name() + _GIVN, name.getGiven());
+            ancestor.getEventsFacts().forEach(eventFact -> {
                 if (eventFact.getTag().equals("BIRT"))
-                    resultMap.put(THIRD_BIRT, eventFact.getDate());
+                    resultMap.put(ancestorId.name() + _BIRT, eventFact.getDate());
                 if (eventFact.getTag().equals("DEAT"))
-                    resultMap.put(THIRD_DEAT, eventFact.getDate());
+                    resultMap.put(ancestorId.name() + _DEAT, eventFact.getDate());
             });
         }
         return resultMap;
@@ -280,12 +312,15 @@ public class Gedcom2Json {
     public void createCSVFile(Set<LineageMap> maps) throws IOException {
         FileWriter out = new FileWriter("lineage.csv");
         FileWriter outnohan = new FileWriter("lineage_chinese_filtered.csv");
+        //print out all lineages
         try (CSVPrinter printer = new CSVPrinter(out, CSVFormat.DEFAULT.withHeader(headers()))) {
             maps.forEach(lineageMap -> {
                 List<String> values = new ArrayList<>();
-                Arrays.asList(HeaderEnum.values()).forEach(header -> {
-                    values.add(lineageMap.get(header));
-                });
+                for (AncestorEnum ancestorId : AncestorEnum.values()) {
+                    for (HeaderEnum header : HeaderEnum.values()) {
+                        values.add(lineageMap.get(ancestorId.name() + header.name()));
+                    }
+                }
                 try {
                     printer.printRecord(values);
                 } catch (IOException e) {
@@ -293,32 +328,24 @@ public class Gedcom2Json {
                 }
             });
         }
+        //print out lineages while removing non Chinese char, and filtering out lines with no chinese char at all
         try (CSVPrinter printer = new CSVPrinter(outnohan, CSVFormat.DEFAULT.withHeader(headers()))) {
             maps.forEach(lineageMap -> {
                 List<String> values = new ArrayList<>();
-                values.add(lineageMap.get(FIRST_ID));
-                values.add(this.extractHanScriptfrom(lineageMap.get(FIRST__MARRNM)));
-                values.add(this.extractHanScriptfrom(lineageMap.get(FIRST_GIVN)));
-                values.add(lineageMap.get(FIRST_BIRT));
-                values.add(lineageMap.get(FIRST_DEAT));
-                values.add(lineageMap.get(SECOND_ID));
-                values.add(this.extractHanScriptfrom(lineageMap.get(SECOND__MARRNM)));
-                values.add(this.extractHanScriptfrom(lineageMap.get(SECOND_GIVN)));
-                values.add(lineageMap.get(SECOND_BIRT));
-                values.add(lineageMap.get(SECOND_DEAT));
-                values.add(lineageMap.get(THIRD_ID));
-                values.add(this.extractHanScriptfrom(lineageMap.get(THIRD__MARRNM)));
-                values.add(this.extractHanScriptfrom(lineageMap.get(THIRD_GIVN)));
-                values.add(lineageMap.get(THIRD_BIRT));
-                values.add(lineageMap.get(THIRD_DEAT));
+                boolean isEmpty = true;
+                for (AncestorEnum ancestorId : AncestorEnum.values()) {
+                    for (HeaderEnum header : HeaderEnum.values()) {
+                        if (header.equals(__MARRNM) || header.equals(_GIVN)) {
+                            String value = this.extractHanScriptfrom(lineageMap.get(ancestorId.name() + header.name()));
+                            values.add(value);
+                            if (!value.isEmpty())
+                                isEmpty = false;
+                        } else
+                            values.add(lineageMap.get(ancestorId.name() + header.name()));
+                    }
+                }
                 //filter empty content
-                if (!(values.get(1).isEmpty()
-                        && values.get(2).isEmpty()
-                        && values.get(6).isEmpty()
-                        && values.get(7).isEmpty()
-                        && values.get(11).isEmpty()
-                        && values.get(12).isEmpty())
-                ) {
+                if (!isEmpty) {
                     try {
                         printer.printRecord(values);
                     } catch (IOException e) {
@@ -329,40 +356,49 @@ public class Gedcom2Json {
         }
     }
 
-    public enum HeaderEnum {
-        FIRST_ID,
-        FIRST__MARRNM,
-        FIRST_GIVN,
-        FIRST_BIRT,
-        FIRST_DEAT,
-        SECOND_ID,
-        SECOND__MARRNM,
-        SECOND_GIVN,
-        SECOND_BIRT,
-        SECOND_DEAT,
-        THIRD_ID,
-        THIRD__MARRNM,
-        THIRD_GIVN,
-        THIRD_BIRT,
-        THIRD_DEAT,
+    public enum AncestorEnum {
+        FIRST,
+        SECOND,
+        THIRD,
+        MID,
+        END
     }
 
-    private static class LineageMap extends EnumMap<HeaderEnum, String> {
+    public enum HeaderEnum {
+        _ID,
+        __MARRNM,
+        _GIVN,
+        _BIRT,
+        _DEAT,
+    }
 
-        public LineageMap(Class<HeaderEnum> keyType) {
-            super(keyType);
+    /*public static class AncestorSet {
+
+        Set<Ancestor> ancestorSet = new HashSet<Ancestor>();
+
+        AncestorSet() {
+            ancestorSet.add(new Ancestor(FIRST));
+            ancestorSet.add(new Ancestor(SECOND));
+            ancestorSet.add(new Ancestor(THIRD));
+            ancestorSet.add(new Ancestor(MID));
+            ancestorSet.add(new Ancestor(END));
         }
 
-        private int entryHashCode(HeaderEnum key) {
+    }*/
+
+    private static class LineageMap extends HashMap<String, String> {
+
+        private int entryHashCode(String key) {
             return (key.hashCode() ^ this.get(key).hashCode());
         }
+
 
         @Override
         public int hashCode() {
             int h = 0;
 
-            for (HeaderEnum key : HeaderEnum.values()) {
-                if (key == FIRST_ID || key == SECOND_ID || key == THIRD_ID)
+            for (String key : this.keySet()) {
+                if (key.endsWith(_ID.name()))
                     continue;
                 if (null != this.get(key)) {
                     h += entryHashCode(key);
@@ -383,8 +419,8 @@ public class Gedcom2Json {
             if (this.size() != m.size())
                 return false;
 
-            for (HeaderEnum key : HeaderEnum.values()) {
-                if (key == FIRST_ID || key == SECOND_ID || key == THIRD_ID)
+            for (String key : this.keySet()) {
+                if (key.endsWith(_ID.name()))
                     continue;
                 if (null == this.get(key)) {
                     if (!((null == m.get(key)) && m.containsKey(key)))
@@ -403,15 +439,15 @@ public class Gedcom2Json {
     public static class LineageMapSorter implements Comparator<LineageMap> {
         @Override
         public int compare(LineageMap e1, LineageMap e2) {
-            int first = e1.get(FIRST_ID).compareToIgnoreCase(e2.get(FIRST_ID));
+            int first = e1.get("FIRST_ID").compareToIgnoreCase(e2.get("FIRST_ID"));
             if (first == 0) {
-                int second = e1.get(SECOND_ID).compareToIgnoreCase(e2.get(SECOND_ID));
+                int second = e1.get("SECOND_ID").compareToIgnoreCase(e2.get("SECOND_ID"));
                 if (second == 0) {
-                    String thirdid1 = e1.get(THIRD_ID);
-                    String thirdid2 = e2.get(THIRD_ID);
+                    String thirdid1 = e1.get("THIRD_ID");
+                    String thirdid2 = e2.get("THIRD_ID");
                     if (null != thirdid1)
                         if (null != thirdid2)
-                            return e1.get(THIRD_ID).compareToIgnoreCase(e2.get(THIRD_ID));
+                            return e1.get("THIRD_ID").compareToIgnoreCase(e2.get("THIRD_ID"));
                         else
                             return -1;
                     else if (null != thirdid2)
